@@ -1,0 +1,448 @@
+
+services:
+  # --- TRAEFIK (Proxy & Reverse Proxy) ---
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
+    restart: always
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - demo_net
+
+  # --- FRONTEND ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    stdin_open: true
+    tty: true
+    ports:
+      - "5173:5173"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+      - NODE_OPTIONS=--max-old-space-size=4096
+    networks:
+      - demo_net
+    depends_on:
+      - api-gateway
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.entrypoints=web"
+      - "traefik.http.services.frontend.loadbalancer.server.port=5173"
+      - "traefik.http.routers.frontend.priority=10"
+
+  # --- API GATEWAY (Port 8084) ---
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: api-gateway
+    ports:
+      - "8084:8084"
+    environment:
+      - SERVER_PORT=8084
+      - AUTH_BASE_URL=http://auth-service:8083
+      - USERS_BASE_URL=http://users-service:8081
+      - DEVICES_BASE_URL=http://devices-service:8082
+      - CHAT_BASE_URL=http://chat-service:8086
+      - WEBSOCKET_BASE_URL=http://websocket-service:8087
+      - LOAD_BALANCER_BASE_URL=http://load-balancer-service:8088
+      # Monitoring base URL points to replica 0 by default internally, or configured via specialized routing
+      - MONITORING_BASE_URL=http://monitoring-service-0:8085
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+    networks:
+      - demo_net
+    depends_on:
+      - auth-service
+      - users-service
+      - devices-service
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gateway.rule=PathPrefix(`/auth`) || PathPrefix(`/users`) || PathPrefix(`/devices`) || PathPrefix(`/api`) || PathPrefix(`/people`) || PathPrefix(`/chat`) || PathPrefix(`/monitoring`)"
+      - "traefik.http.routers.gateway.entrypoints=web"
+      - "traefik.http.services.gateway.loadbalancer.server.port=8084"
+      - "traefik.http.routers.gateway.priority=20"
+
+  # --- USERS SERVICE (Port 8081) ---
+  users-service:
+    build:
+      context: ./users-service
+      dockerfile: Dockerfile
+    container_name: users-service
+    expose:
+      - "8081"
+    environment:
+      - DB_IP=users-db
+      - DB_PORT=5432
+      - DB_DBNAME=users-db
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - PORT=8081
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+    networks:
+      - demo_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/actuator/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      - users-db
+      - rabbitmq
+
+  # --- DEVICES SERVICE (Port 8082) ---
+  devices-service:
+    build:
+      context: ./devices-service
+      dockerfile: Dockerfile
+    container_name: devices-service
+    expose:
+      - "8082"
+    environment:
+      - DB_IP=devices-db
+      - DB_PORT=5432
+      - DB_DBNAME=devices-db
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - PORT=8082
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+    networks:
+      - demo_net
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8082/actuator/health" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      devices-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
+  # --- AUTH SERVICE (Port 8083) ---
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: auth-service
+    expose:
+      - "8083"
+    environment:
+      - DB_IP=auth-db
+      - DB_PORT=5432
+      - DB_DBNAME=credentials-db
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - PORT=8083
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+    networks:
+      - demo_net
+    depends_on:
+      auth-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
+  # --- CHAT SERVICE (Port 8086) ---
+  # --- CHAT SERVICE (Acum include si WebSocket) ---
+  chat-service:
+    build:
+      context: ./chat-service
+      dockerfile: Dockerfile
+    container_name: chat-service
+    environment:
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - DB_IP=chat-db
+      - DB_PORT=5432
+      - DB_DBNAME=chat-db
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - PORT=8086
+      - GEMINI_API_KEY=
+      - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - RABBITMQ_IP=rabbitmq
+      - RABBITMQ_PORT=5672
+    networks:
+      - demo_net
+    depends_on:
+      chat-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+    labels:
+      - "traefik.enable=true"
+      # AICI E SCHIMBAREA: Chat-ul preia și rutele de WebSocket (/ws)
+      - "traefik.http.routers.chat.rule=PathPrefix(`/chat`) || PathPrefix(`/ws`)"
+      - "traefik.http.routers.chat.entrypoints=web"
+      - "traefik.http.services.chat.loadbalancer.server.port=8086"
+
+
+
+
+  # --- LOAD BALANCER SERVICE (Port 8088) ---
+  load-balancer-service:
+    build:
+      context: ./load-balancer-service
+      dockerfile: Dockerfile
+    container_name: load-balancer-service
+    expose:
+      - "8088"
+    environment:
+      - PORT=8088
+      - MONITORING_REPLICAS_COUNT=3
+      - LOAD_BALANCER_STRATEGY=CONSISTENT_HASH
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - RABBITMQ_IP=rabbitmq
+      - RABBITMQ_PORT=5672
+    networks:
+      - demo_net
+    depends_on:
+      - rabbitmq
+
+  # --- MONITORING REPLICAS (Port 8085 / Scaled) ---
+  
+  # REPLICA 0 (Index 0 pentru algoritmul de hash)
+  monitoring-service-0:
+    build:
+      context: ./monitoring-service
+      dockerfile: Dockerfile
+    container_name: monitoring-service-0
+    ports:
+      - "8085:8085" # Doar prima replică are portul original mapat pe host
+    environment:
+      - DB_IP=monitoring-db
+      - DB_PORT=5432
+      - DB_DBNAME=monitoring-db
+      - DB_USER=postgres
+      - DB_PASSWORD=root
+      - PORT=8085
+      - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+      - RABBITMQ_IP=rabbitmq
+      - RABBITMQ_PORT=5672
+      - MONITORING_QUEUE_NAME=monitoring_queue_0
+      - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+      - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+    networks:
+      - demo_net
+    depends_on:
+      monitoring-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
+  # REPLICA 1 (Index 1)
+  #monitoring-service-1:
+  #  build:
+  #    context: ./monitoring-service
+  #    dockerfile: Dockerfile
+  #  container_name: monitoring-service-1
+  #  ports:
+  #    - "8090:8085" # Mapare diferită pe host pentru a evita conflictul
+  #  environment:
+  #    - DB_IP=monitoring-db
+  #    - DB_PORT=5432
+  #    - DB_DBNAME=monitoring-db
+  #    - DB_USER=postgres
+  #    - DB_PASSWORD=root
+  #    - PORT=8085
+  #    - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+  #    - RABBITMQ_IP=rabbitmq
+  #    - RABBITMQ_PORT=5672
+  #    - MONITORING_QUEUE_NAME=monitoring_queue_1
+  #    - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+  #    - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+  #  networks:
+  #    - demo_net
+  #  depends_on:
+  #    monitoring-db:
+  #      condition: service_healthy
+  #    rabbitmq:
+  #      condition: service_started
+
+  # REPLICA 2 (Index 2)
+  #monitoring-service-2:
+  #  build:
+  #    context: ./monitoring-service
+  #    dockerfile: Dockerfile
+  #  container_name: monitoring-service-2
+  #  ports:
+  #    - "8091:8085" # Mapare diferită pe host
+  #  environment:
+  #    - DB_IP=monitoring-db
+  #    - DB_PORT=5432
+  #    - DB_DBNAME=monitoring-db
+  #    - DB_USER=postgres
+  #    - DB_PASSWORD=root
+  #    - PORT=8085
+  #    - JAVA_OPTS=-Xmx192m -Xms128m -XX:ReservedCodeCacheSize=64M -XX:MaxMetaspaceSize=128m
+  #    - RABBITMQ_IP=rabbitmq
+  #    - RABBITMQ_PORT=5672
+  #    - MONITORING_QUEUE_NAME=monitoring_queue_2
+  #    - JWT_SECRET=404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970
+  #    - INTERNAL_SECRET=CheiaMeaSecretaFoarteSigura_DS2025
+  #  networks:
+  #    - demo_net
+  #  depends_on:
+  #    monitoring-db:
+  #      condition: service_healthy
+  #    rabbitmq:
+  #      condition: service_started
+
+  # --- BAZE DE DATE ---
+  users-db:
+    image: postgres:16
+    container_name: users-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: users-db
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d users-db -h localhost" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - demo_net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  devices-db:
+    image: postgres:16
+    container_name: devices-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: devices-db
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d devices-db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - demo_net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  auth-db:
+    image: postgres:16
+    container_name: auth-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: credentials-db
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d credentials-db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - demo_net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  chat-db:
+    image: postgres:16
+    container_name: chat-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: chat-db
+    ports:
+      - "5437:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d chat-db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - demo_net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  monitoring-db:
+    image: postgres:16
+    container_name: monitoring-db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: monitoring-db
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d monitoring-db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - demo_net
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # --- RABBITMQ ---
+  rabbitmq:
+    image: rabbitmq:3.12-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"   # Portul pentru comunicare
+      - "15672:15672" # Interfata de management
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    networks:
+      - demo_net
+
+networks:
+  demo_net:
+    driver: bridge
